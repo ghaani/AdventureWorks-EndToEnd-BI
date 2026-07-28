@@ -83,7 +83,7 @@ CREATE TABLE dbo.DimCustomer (
     CustomerAlternateKey    INT          NOT NULL,                   -- OLTP Sales.Customer.CustomerID
     FirstName               NVARCHAR(50) NULL,
     LastName                NVARCHAR(50) NULL,
-    FullName                NVARCHAR(100) NULL,
+    FullName                NVARCHAR(150) NULL,
     EmailAddress            NVARCHAR(50) NULL,
     City                    NVARCHAR(30) NULL,
     StateProvinceName       NVARCHAR(50) NULL,
@@ -133,7 +133,7 @@ IF OBJECT_ID('dbo.DimSalesPerson', 'U') IS NOT NULL DROP TABLE dbo.DimSalesPerso
 CREATE TABLE dbo.DimSalesPerson (
     SalesPersonKey           INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
     SalesPersonAlternateKey  INT          NOT NULL,                   -- OLTP Sales.SalesPerson.BusinessEntityID
-    FullName                 NVARCHAR(100) NOT NULL,
+    FullName                 NVARCHAR(150) NOT NULL,
     JobTitle                 NVARCHAR(50) NULL,
     SalesQuota               MONEY        NULL
 );
