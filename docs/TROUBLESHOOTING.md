@@ -62,4 +62,57 @@ run — and even then, via `UPDATE`/`MERGE` logic rather than `DELETE` + full re
 
 ---
 
+## 3. `NULL` insert into an `IDENTITY` column caused by "Keep Identity"
+
+**Phase:** 2 — SSIS, `Package_DimCurrency`
+**Symptom:**
+```
+[OLE DB Destination] Error: SSIS Error Code DTS_E_OLEDBERROR. An OLE DB error has occurred.
+Cannot insert the value NULL into column 'CurrencyKey', table 'AdventureWorksDW_Custom.dbo.DimCurrency';
+column does not allow nulls. INSERT fails.
+```
+
+**Root cause:**
+`CurrencyKey` is defined as `INT IDENTITY(1,1)` — SQL Server generates it automatically and no value
+should be supplied from the Data Flow. The OLE DB Destination's **"Keep Identity"** option was checked,
+which tells SSIS to explicitly pass a value for the identity column instead of letting SQL Server
+generate one. Since the source query has no `CurrencyKey` column to map, SSIS passed `NULL`, which
+violated the `NOT NULL` constraint on the identity column.
+
+**Fix:** unchecked **"Keep Identity"** in the OLE DB Destination's Connection Manager settings, so SQL
+Server generates `CurrencyKey` values itself on insert. (A related but different mistake to watch for:
+mapping the identity column to `<ignore>` in the Mappings tab — that alone doesn't fix it if "Keep
+Identity" is still checked.)
+
+**Lesson:** for every dimension load, the surrogate `IDENTITY` key should never receive a value from
+the source system — both the Mappings tab (`<ignore>` for the key column) *and* "Keep Identity" being
+unchecked are required. This applies to every Type 1 and Type 2 dimension package in this project.
+
+---
+
+## 4. `FullName` truncation warning from concatenated first/last name
+
+**Phase:** 2 — SSIS, `Package_DimSalesPerson`
+**Symptom:**
+```
+[OLE DB Destination] Warning: Truncation may occur due to inserting data from data flow column
+"FullName" with a length of 101 to database column "FullName" with a length of 100.
+```
+
+**Root cause:**
+`DimSalesPerson.FullName` (and, by the same pattern, `DimCustomer.FullName`) was defined as
+`NVARCHAR(100)` in the Phase 1 DDL, populated via `FirstName + ' ' + LastName`. In the OLTP source,
+`Person.FirstName` and `Person.LastName` are each up to 50 characters, so the worst case is
+`50 + 1 (space) + 50 = 101` characters — one character over the column's limit.
+
+**Fix:** widened both `DimSalesPerson.FullName` and `DimCustomer.FullName` to `NVARCHAR(150)`, and
+updated the original `01_create_dw_schema.sql` so a fresh run of the project doesn't hit the same
+warning.
+
+**Lesson:** when a dimension column is built by concatenating two source columns, size it against the
+*sum* of the source columns' max lengths (plus any separator), not an arbitrary round number. A quick
+DDL review catches this before it becomes a runtime warning.
+
+---
+
 <!-- Add new entries below this line as the project progresses. -->
