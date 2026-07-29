@@ -43,6 +43,7 @@ AdventureWorks sales management wants a Data Warehouse that can:
 ```
 /docs      → architecture decisions, source system analysis, troubleshooting log
 /sql       → DDL scripts, standalone T-SQL used by SSIS Execute SQL Tasks
+  /migrations → incremental ALTER scripts applied after the DW was already created
 /ssis      → Integration Services project (.dtsx packages)
 /ssas      → Tabular model project
 /powerbi   → .pbix report file(s)
@@ -58,6 +59,7 @@ AdventureWorks sales management wants a Data Warehouse that can:
 ## Documentation
 
 - [Phase 0 — Source System Analysis](docs/Phase0_Source_System_Analysis.pdf)
+- [Architecture Decisions](docs/ARCHITECTURE.md)
 - [Challenges & Lessons Learned](docs/TROUBLESHOOTING.md)
 
 ---
