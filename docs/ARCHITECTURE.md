@@ -32,4 +32,28 @@ Dimension** wizard component.
 
 ---
 
+## 2. Hybrid SCD (Type 1 + Type 2 columns within DimCustomer)
+
+**Phase:** 2 — SSIS, `Package_DimCustomer`
+**Decision:** not every column in `DimCustomer` is versioned as Type 2. Columns are split:
+- **Type 1 (overwrite in place, no new row):** `FirstName`, `LastName`, `FullName`, `EmailAddress`
+- **Type 2 (new row + close old row):** `City`, `StateProvinceName`, `CountryRegionName`, `PostalCode`
+
+**Reasoning:**
+The test for Type 1 vs. Type 2 per column is whether the historical value matters for reporting.
+A name correction or typo fix has no analytical meaning — no report needs to know a customer used to
+be spelled differently. Geography, on the other hand, directly affects historically accurate
+territory/region analysis: if a customer relocated, sales made before the move should still be
+attributed to their location *at the time of the sale*, not their current one. Treating every column
+as Type 2 would create a new dimension row (and inflate the table) for a harmless name correction,
+while treating every column as Type 1 would silently corrupt historical geography-based analysis.
+This same per-column Type 1/Type 2 split is used in Microsoft's own `AdventureWorksDW` sample.
+
+**Implementation impact:** the Conditional Split in `Package_DimCustomer` has two real outputs instead
+of one — `Type2Changed` (any geography column differs) and `Type1OnlyChanged` (only name/email differ,
+evaluated after the Type2 check) — routed to two different destinations. See the package build notes
+for the exact flow.
+
+---
+
 <!-- Add new entries below this line as new architecture decisions are made. -->
