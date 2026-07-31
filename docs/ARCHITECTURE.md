@@ -56,4 +56,57 @@ for the exact flow.
 
 ---
 
+## 3. Allocating header-level Tax and Freight down to the line-item grain
+
+**Phase:** 2 — SSIS, `Package_FactInternetSales` / `Package_FactResellerSales`
+**Decision:** `TaxAmt` and `Freight` are only recorded at the **order header** level in OLTP
+(`Sales.SalesOrderHeader`), not per line item. Since the fact grain is one row per line item (per
+Phase 0), each line's share of tax and freight is calculated proportionally to its share of the
+order's subtotal:
+
+```sql
+LineTaxAmt  = Header.TaxAmt  * (LineTotal / NULLIF(Header.SubTotal, 0))
+LineFreight = Header.Freight * (LineTotal / NULLIF(Header.SubTotal, 0))
+```
+
+`NULLIF(SubTotal, 0)` guards against a divide-by-zero on the rare order with a zero subtotal.
+
+**Reasoning:**
+This is a standard data warehousing technique called **allocation** — distributing a value that's only
+known at a coarser grain down to a finer one, using a reasonable proportional basis (here, each line's
+share of the order total). The alternative — storing tax/freight only on one arbitrary line, or
+duplicating the full header amount on every line — would either lose information or massively overstate
+totals when the fact is aggregated (e.g. `SUM(Freight)` would multiply-count the same shipping charge
+once per line item on multi-line orders). Allocating proportionally keeps `SUM(LineTotal)`,
+`SUM(TaxAmt)`, and `SUM(Freight)` all consistent with the original order-level totals when rolled back
+up.
+
+---
+
+## 4. No staging database/tables
+
+**Phase:** 2 — SSIS (all packages)
+**Decision:** this project reads directly from `AdventureWorks2025` (OLTP) into each Data Flow's
+Lookup/Transform chain and writes straight to the DW tables — there is no intermediate staging
+database or staging tables holding raw, untransformed data.
+
+**Reasoning:**
+A staging layer earns its complexity under conditions this project doesn't have:
+- **Multiple heterogeneous sources** (e.g. SQL Server + a CSV export + an API) that need to be
+  normalized to a common shape before being combined — this project has exactly one source database.
+- **Very high volume**, where reading directly from the operational system during ETL would put
+  unacceptable load on it — the largest source table here (`Sales.SalesOrderDetail`) is ~121K rows,
+  well within what a direct read handles comfortably.
+- **Multi-step transforms** where an intermediate result needs to be persisted and re-used, or where
+  **restart-ability** matters (resuming a failed load from a saved raw snapshot instead of re-querying
+  a source that may no longer reflect the same state).
+- **Auditing raw data** independently of what the transform logic did to it.
+
+None of these apply at AdventureWorks' scale with a single source and single-step Lookup-based
+transforms, so a staging layer would add engineering overhead without a corresponding benefit
+(over-engineering). This is a deliberate omission, not an oversight — the trade-offs above are the
+threshold that would justify introducing one if the project's scale or source count ever changed.
+
+---
+
 <!-- Add new entries below this line as new architecture decisions are made. -->
