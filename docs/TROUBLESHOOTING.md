@@ -180,4 +180,34 @@ hint at which one was intended.
 
 ---
 
+## 7. Orphaned `'Running'` rows in `ETL_ExecutionLog` from interrupted debug runs
+
+**Phase:** 2 — SSIS, `Package_Master` event handlers
+**Symptom:** multiple rows in `dbo.ETL_ExecutionLog` for what felt like a single execution, some stuck
+at `Status = 'Running'` with `EndTime IS NULL` forever.
+
+**Root cause:** not a bug in the `OnPreExecute` / `OnPostExecute` / `OnError` event handler logic
+itself. Stopping a package mid-run in Visual Studio (Stop Debugging, or killing an in-progress
+execution) ends the run abnormally — neither `OnPostExecute` (normal success) nor `OnError` (normal
+failure) gets a chance to fire, since the package never reaches a natural completion state. The
+`'Running'` row inserted by `OnPreExecute` at the start is simply never updated. Repeatedly
+starting-and-stopping a run while testing (e.g. while wiring up the event handlers themselves)
+produces one stale `'Running'` row per interrupted attempt.
+
+**Not fixed — accepted as a known limitation.** This only happens during interactive debugging in
+Visual Studio; a package invoked by SQL Server Agent (the real deployment scenario) either completes
+normally or is caught by `OnError`, so orphaned rows shouldn't occur in production use. Stale rows can
+be identified and cleaned up manually with:
+```sql
+SELECT * FROM dbo.ETL_ExecutionLog WHERE Status = 'Running';
+-- after confirming these are genuinely abandoned (not an actual in-progress run):
+DELETE FROM dbo.ETL_ExecutionLog WHERE Status = 'Running' AND StartTime < DATEADD(HOUR, -1, GETDATE());
+```
+
+**Lesson:** logging schemes built around start/end event pairs always need to account for the "started
+but never cleanly finished" case — whether from a debugger stop, a server crash, or a killed process —
+rather than assuming every `'Running'` row will eventually be closed out.
+
+---
+
 <!-- Add new entries below this line as the project progresses. -->
