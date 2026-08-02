@@ -132,6 +132,35 @@ truncate-and-reload step will be replaced by an incremental upsert.
 
 ---
 
+## 6. Sequential (not parallel) execution of the two fact packages
+
+**Phase:** 2 — SSIS, `Package_Master`
+**Decision:** `Execute FactInternetSales` and `Execute FactResellerSales` run one after another (a
+Precedence Constraint between them), instead of both starting in parallel after `SEQ_LoadDimensions`
+completes.
+
+**Reasoning:**
+Architecturally, the two fact loads are independent of each other and could run in parallel — nothing
+about the design requires them to be sequential. The decision here is purely a match to the actual
+development machine's resources (Intel Core i5-6300U, dual-core, 8 GB RAM). Each fact package runs a
+Data Flow with 7–8 full-cache Lookups against ~121K source rows; running both simultaneously meant the
+CPU and RAM were shared between two memory- and CPU-heavy Data Flows at once, causing heavy contention
+(context switching, possible paging) rather than a real speedup. Running them sequentially removed that
+contention and was faster in practice on this hardware, even though it's architecturally "slower" in
+theory (no parallelism).
+
+**This is an infrastructure-driven trade-off, not a data or logic constraint.** On a machine with more
+cores and RAM, switching back to parallel execution (removing the Precedence Constraint) would very
+likely be faster and is a reasonable thing to revisit if the project is ever run on stronger hardware
+(e.g. a server, or during SSAS/Power BI development on different infrastructure). Documented here so
+the choice isn't mistaken for a hidden dependency between the two fact tables — there isn't one.
+
+**Measured result:** on the development machine, running both fact packages in parallel took ~6
+minutes; running them sequentially took ~1 minute for the same full `Package_Master` run — resource
+contention wasn't a minor overhead, it was the dominant cost.
+
+---
+
 <!-- Add new entries below this line as new architecture decisions are made. -->
 
 ---
