@@ -109,4 +109,48 @@ threshold that would justify introducing one if the project's scale or source co
 
 ---
 
+## 5. Fact packages truncate-and-reload on every run (interim, until Phase 3)
+
+**Phase:** 2 — SSIS, `Package_FactInternetSales` / `Package_FactResellerSales`
+**Decision:** each fact package runs `TRUNCATE TABLE` on its target fact table (via an Execute SQL
+Task) immediately before its Data Flow Task, so every run fully reloads the table from scratch.
+
+**Reasoning:**
+Neither fact package has incremental-extraction logic yet — every run reads the full
+`Sales.SalesOrderDetail` / `Sales.SalesOrderHeader` join from OLTP. Without clearing the table first,
+re-running the package (e.g. via `Package_Master`, or just re-testing) throws a `PRIMARY KEY` violation
+on `(SalesOrderNumber, SalesOrderLineNumber)` for every row already loaded. `TRUNCATE` is safe here
+(unlike the `DimDate` situation — see Troubleshooting entry #1) because no other table holds a
+`FOREIGN KEY` reference *to* either fact table; they're leaf tables in the schema.
+
+**Status: intentionally temporary.** This satisfies correctness for now, but not the Phase 0 business
+scenario's actual requirement ("update incrementally, not via full reload") — a full reload of ~121K+
+rows on every run doesn't scale and defeats the purpose of incremental loading. The "Planned — not yet
+implemented" section below already tracks the real fix: filtering the OLE DB Source query with a
+`ModifiedDate`-based watermark so only new/changed orders are extracted, at which point this
+truncate-and-reload step will be replaced by an incremental upsert.
+
+---
+
 <!-- Add new entries below this line as new architecture decisions are made. -->
+
+---
+
+## Planned — not yet implemented
+
+Ideas captured during design discussions that belong to a specific upcoming phase. Move each one into
+a numbered decision above once it's actually implemented, with the real reasoning and any trade-offs
+discovered during the build.
+
+- **Phase 3 — Incremental extraction using `ModifiedDate` as a watermark.**
+  Current dimension packages do a full read of the source table on every run and detect changes via
+  column-by-column comparison in a Conditional Split (see decision #2). Most AdventureWorks OLTP
+  tables (`Production.Product`, `Sales.Customer`, `Sales.SalesOrderHeader`, etc.) already have a
+  `ModifiedDate DATETIME` column. A future incremental-extraction pass can filter the OLE DB Source
+  query to `WHERE ModifiedDate > @LastETLRunDate`, so only rows actually changed since the last run
+  are read and compared — instead of reading the full source table every time. This satisfies the
+  Phase 0 business scenario requirement ("update incrementally, not via full reload") more literally
+  than the current change-detection-only approach.
+  (Note: SQL Server's `timestamp`/`rowversion` type is a separate, unrelated mechanism — an
+  auto-incrementing per-row version number, not an actual date/time — that could serve the same
+  watermark purpose if a table lacked a `ModifiedDate` column.)
