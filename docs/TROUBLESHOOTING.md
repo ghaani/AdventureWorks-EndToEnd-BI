@@ -115,4 +115,69 @@ DDL review catches this before it becomes a runtime warning.
 
 ---
 
+## 5. `FactResellerSales` was missing `CurrencyKey`
+
+**Phase:** 2 — SSIS, `Package_FactResellerSales` (caught while writing the OLE DB Source query)
+**Symptom:** not a runtime error — a design gap noticed while building the Reseller Sales source
+query and comparing it against `FactInternetSales`.
+
+**Root cause:**
+The original Phase 1 DDL gave `FactInternetSales` a `CurrencyKey` but left it off
+`FactResellerSales`. This wasn't a deliberate business decision — `Sales.SalesOrderHeader.CurrencyRateID`
+applies to every order in OLTP regardless of whether the customer is an Internet customer or a
+reseller/store, so there was no real reason to track currency on one fact table and not the other. It
+was simply missed when the schema was first designed.
+
+**Fix:**
+- `sql/migrations/002_add_currencykey_to_factresellersales.sql` — adds `CurrencyKey` to the existing
+  table via `ALTER TABLE`, defaulting existing/future unmatched rows to the Unknown Member (`0`).
+- `01_create_dw_schema.sql` updated so a fresh build of the database includes the column from the
+  start.
+- `sql/source_factresellersales.sql` updated to resolve `CurrencyCode_BK` the same way
+  `FactInternetSales` does (via `Sales.CurrencyRate`, defaulting to `'USD'` for domestic orders).
+
+**Lesson:** when two fact tables share a conceptually similar grain (line item, tied to an order
+header), it's worth explicitly diffing their column lists against each other during schema design —
+not just against the source system — to catch this kind of asymmetry before packages are built around
+the gap.
+
+---
+
+## 6. `SalesOrderLineNumber` overflow — global identity used instead of per-order line number
+
+**Phase:** 2 — SSIS, `Package_FactResellerSales` (bug also present in `Package_FactInternetSales`)
+**Symptom:**
+```
+[OLE DB Destination] Error: ... "Invalid character value for cast specification".
+[OLE DB Destination] Error: ... Columns[SalesOrderLineNumber] ... "Conversion failed because the
+data value overflowed the specified type."
+```
+
+**Root cause:**
+The source query used `sod.SalesOrderDetailID` directly as `SalesOrderLineNumber`. But
+`SalesOrderDetailID` is a **global identity** across the entire `Sales.SalesOrderDetail` table
+(spanning all ~121,317 rows across every order), not a line number scoped to a single order.
+`FactInternetSales.SalesOrderLineNumber` / `FactResellerSales.SalesOrderLineNumber` are defined as
+`TINYINT` (max 255) in the Phase 1 DDL, since a "line number within one order" was always expected to
+be small — so any row with a global `SalesOrderDetailID` above 255 overflowed the column on insert.
+
+**Fix:** replaced the column reference with a windowed row number scoped to each order:
+```sql
+ROW_NUMBER() OVER (PARTITION BY sod.SalesOrderID ORDER BY sod.SalesOrderDetailID) AS SalesOrderLineNumber
+```
+This restarts the count at 1 for every `SalesOrderID`, matching what the column was actually meant to
+represent, and comfortably fits in `TINYINT` since no single order has anywhere near 255 line items.
+Applied to both `source_factinternetsales.sql` and `source_factresellersales.sql`.
+
+**Follow-up required:** `FactInternetSales` was built before this bug was found and needs to be
+truncated and reloaded with the corrected query — any rows already loaded have an incorrect
+(and possibly overflow-avoiding-by-luck) `SalesOrderLineNumber`.
+
+**Lesson:** when a source system's identity/primary key column looks like it could serve as a
+"line number," check whether it's scoped to the parent entity (per-order) or global to the whole
+table before assuming the two are interchangeable — the data type chosen in the DW schema is a strong
+hint at which one was intended.
+
+---
+
 <!-- Add new entries below this line as the project progresses. -->
