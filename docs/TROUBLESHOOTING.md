@@ -210,4 +210,58 @@ rather than assuming every `'Running'` row will eventually be closed out.
 
 ---
 
+## 8. `FactInternetSales` / `FactResellerSales` — all rows collapsed to a single `OrderDateKey`
+
+**Phase:** 4 — SSAS Tabular Model
+**Symptom:** After deploying the Tabular model and testing with an Excel PivotTable, all measures
+(e.g. `Internet Net Revenue`, `Reseller Net Revenue`) only showed up under a single Year (2010) /
+Month (January) combination, with the Grand Total exactly equal to that single row.
+
+**Root cause:**
+`DimDate` had been originally populated with a date range ending at `2016-12-31`
+(`MAX(DateKey) = 20161231`). However, the actual `OrderDate` values in the OLTP source (and
+consequently the `OrderDateKey_BK` values computed in the SSIS Data Flow) started as early as
+`2022-05-30` (`MIN(OrderDateKey) = 20220530`) — entirely outside the populated range of `DimDate`.
+
+As a result, the Lookup Transformation resolving `OrderDateKey_BK` → `DimDate.DateKey` failed to find
+a match for every single row. Instead of erroring out, the Lookup silently returned the first cached
+row of the reference table (`DimDate`'s minimum `DateKey`, `20100101`), causing all 60,398 fact rows
+to be recorded under the same (incorrect) date key.
+
+**Why it was hard to spot initially:**
+- The row count in the fact tables was correct — only the `OrderDateKey` value was wrong, not the
+  number of rows.
+- No SSIS error or warning was raised, because a Lookup with "redirect to no-match output" or default
+  caching behavior can silently fall back to a matched row rather than failing loudly.
+- The bug only became visible once the model was tested in a client tool (Excel PivotTable) and the
+  year/month breakdown looked suspiciously flat.
+
+**Diagnosis steps:**
+1. Compared `MIN`/`MAX` of `DimDate.DateKey` against `MIN`/`MAX` of `FactInternetSales.OrderDateKey`
+   directly in SQL — this immediately revealed the non-overlapping ranges.
+2. Confirmed via `COUNT(DISTINCT OrderDateKey)` that all rows shared a single date key, ruling out a
+   partial/intermittent mapping issue.
+
+**Fix:**
+1. Regenerated `DimDate` with an extended range (through the end of 2036) to fully cover the OLTP
+   source's actual order date range.
+2. Truncated `FactInternetSales` and `FactResellerSales` (existing rows carried the wrong `DateKey`
+   and could not be corrected in place).
+3. Reset the corresponding rows in `ETL_Watermark` (`LastExtractDate = '1900-01-01'` for
+   `PackageName IN ('Package_FactInternetSales', 'Package_FactResellerSales')`) so the next run would
+   re-extract all rows instead of skipping them as "already loaded".
+4. Re-ran both fact packages and validated with the same diagnostic query —
+   `COUNT(DISTINCT OrderDateKey)` now returns a realistic number of distinct dates, and the Excel
+   PivotTable correctly breaks out revenue by year and month.
+
+**Lesson learned / preventive measure:**
+When designing or regenerating a date dimension, always validate its range against the actual
+`MIN`/`MAX` of every date column it will be joined against in the fact tables — not just against the
+"expected" business timeframe. A Lookup Transformation that fails to match should ideally be
+configured to redirect non-matching rows to an error output (rather than silently falling back to a
+default/cached row) so that this kind of mismatch fails loudly instead of producing silently incorrect
+data.
+
+---
+
 <!-- Add new entries below this line as the project progresses. -->
