@@ -264,4 +264,70 @@ data.
 
 ---
 
+## 9. `Internet Sales YoY %` always evaluated to 0
+
+**Phase:** 4 — SSAS Tabular Model (DAX)
+**Symptom:** After fixing issue #8, the base revenue measures displayed correctly broken out by year
+and month in an Excel PivotTable. However, the `Internet Sales YoY %` measure showed `0` for every
+single row — including months where a prior-year value clearly existed in the data (e.g. June 2023,
+which has June 2022 data available).
+
+**Root cause:**
+```dax
+Internet Sales PY =
+CALCULATE ( [Internet Net Revenue], SAMEPERIODLASTYEAR ( DimDate[FullDate] ) )
+```
+The Excel PivotTable groups rows by `DimDate[Year]` and `DimDate[MonthName]` as two independent
+columns of the date table. For a cell such as Year = 2023 / Month = June, Excel applies **two
+separate filters** on `DimDate`: `Year = 2023` and `MonthName = 'June'`.
+
+`SAMEPERIODLASTYEAR(DimDate[FullDate])` only overrides the filter on the `FullDate` column, shifting
+it to June 2022 — it does **not** clear the pre-existing `Year = 2023` and `MonthName = 'June'`
+filters coming from the pivot's row context. The combined filter context becomes:
+```
+Year = 2023  AND  MonthName = 'June'  AND  FullDate ∈ (June 2022 dates)
+```
+This is self-contradictory (June 2022 dates have `Year = 2022`, not 2023), so `DimDate` filters down
+to zero rows, and `[Internet Sales PY]` evaluates to `BLANK`. In `DIVIDE(current - BLANK, BLANK)`,
+`BLANK` behaves as `0` in the subtraction (numerator = current value), but the denominator being
+`BLANK`/`0` makes the whole `DIVIDE` result `BLANK`, which Excel's PivotTable then renders as `0`.
+
+This is a well-documented DAX pitfall (referred to in SQLBI's material as filtering a date table by
+multiple independent attribute columns alongside a time-intelligence function).
+
+**Fix:** added `ALL(DimDate)` as an additional filter argument in the same `CALCULATE`, so that all
+other filters on `DimDate` (Year, MonthName, etc.) are cleared before the shifted `FullDate` filter is
+applied:
+```dax
+Internet Sales PY =
+CALCULATE (
+    [Internet Net Revenue],
+    SAMEPERIODLASTYEAR ( DimDate[FullDate] ),
+    ALL ( DimDate )
+)
+
+Reseller Sales PY =
+CALCULATE (
+    [Reseller Net Revenue],
+    SAMEPERIODLASTYEAR ( DimDate[FullDate] ),
+    ALL ( DimDate )
+)
+```
+Within a single `CALCULATE`, `SAMEPERIODLASTYEAR` is evaluated against the *original* row context
+(correctly identifying June 2022 as "last year"), while `ALL(DimDate)` removes the conflicting
+Year/MonthName filters — leaving only the shifted `FullDate` filter in effect. All measures that
+depend on `Internet Sales PY` / `Reseller Sales PY` (YoY %, `Total Sales YoY % (All Channels)`) were
+fixed automatically once these two base measures were corrected, without needing any changes
+themselves — a direct benefit of the "Base Measure" / building-block DAX pattern used throughout this
+model.
+
+**Lesson:** any time a report groups by more than one column of the date table simultaneously (e.g.
+Year and Month as separate pivot fields, or a Year slicer plus a Month slicer), time-intelligence
+measures built with `SAMEPERIODLASTYEAR` / `DATEADD` / similar functions need an explicit
+`ALL(<date table>)` to strip the other date-table filters first — otherwise the shifted-date filter
+silently conflicts with them and produces `BLANK` (which some client tools display as `0`) instead of
+an error, making the bug easy to miss without deliberately testing multiple periods.
+
+---
+
 <!-- Add new entries below this line as the project progresses. -->
