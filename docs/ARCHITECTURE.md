@@ -109,26 +109,24 @@ threshold that would justify introducing one if the project's scale or source co
 
 ---
 
-## 5. Fact packages truncate-and-reload on every run (interim, until Phase 3)
+## 5. Fact packages truncate-and-reload on every run (interim, superseded by Decision #7)
 
 **Phase:** 2 — SSIS, `Package_FactInternetSales` / `Package_FactResellerSales`
 **Decision:** each fact package runs `TRUNCATE TABLE` on its target fact table (via an Execute SQL
 Task) immediately before its Data Flow Task, so every run fully reloads the table from scratch.
 
 **Reasoning:**
-Neither fact package has incremental-extraction logic yet — every run reads the full
+Neither fact package had incremental-extraction logic yet at this point — every run read the full
 `Sales.SalesOrderDetail` / `Sales.SalesOrderHeader` join from OLTP. Without clearing the table first,
-re-running the package (e.g. via `Package_Master`, or just re-testing) throws a `PRIMARY KEY` violation
-on `(SalesOrderNumber, SalesOrderLineNumber)` for every row already loaded. `TRUNCATE` is safe here
+re-running the package (e.g. via `Package_Master`, or just re-testing) threw a `PRIMARY KEY` violation
+on `(SalesOrderNumber, SalesOrderLineNumber)` for every row already loaded. `TRUNCATE` was safe here
 (unlike the `DimDate` situation — see Troubleshooting entry #1) because no other table holds a
 `FOREIGN KEY` reference *to* either fact table; they're leaf tables in the schema.
 
-**Status: intentionally temporary.** This satisfies correctness for now, but not the Phase 0 business
-scenario's actual requirement ("update incrementally, not via full reload") — a full reload of ~121K+
-rows on every run doesn't scale and defeats the purpose of incremental loading. The "Planned — not yet
-implemented" section below already tracks the real fix: filtering the OLE DB Source query with a
-`ModifiedDate`-based watermark so only new/changed orders are extracted, at which point this
-truncate-and-reload step will be replaced by an incremental upsert.
+**Status: superseded.** Phase 3 (Decision #7 below) replaced this truncate-and-reload approach with
+proper watermark-based incremental extraction, satisfying the Phase 0 business scenario requirement
+("update incrementally, not via full reload") that this interim approach didn't yet meet. This entry
+is kept for the historical record of how the fact packages worked before Phase 3.
 
 ---
 
@@ -161,6 +159,116 @@ contention wasn't a minor overhead, it was the dominant cost.
 
 ---
 
+## 7. Watermark-based incremental extraction, with a Stored Procedure fallback for OLE DB parameter-parsing limits
+
+**Phase:** 3 — SSIS (all dimension and fact packages)
+**Decision:** every incrementally-loaded table (8 of the 9 dimensions — all but the static `DimDate`
+— plus both fact tables) filters its OLE DB Source query against a stored watermark value
+(`ModifiedDate > ?`, or the equivalent header/detail columns for the fact tables), rather than reading
+the full source table on every run. The watermark for each package is tracked in an `ETL_Watermark`
+table (columns: `PackageName`, `LastExtractDate`) and updated after a successful load.
+
+For most tables, this filter is a plain parameterized `SQL Command` in the OLE DB Source. Two
+dimensions — `DimCustomer` and `DimReseller` — combine a CTE with a window function
+(`ROW_NUMBER() OVER (...)`) to resolve each customer's/reseller's primary address, which the OLE DB
+provider's parameter parser cannot handle (`"Parameters cannot be extracted from the SQL command"`).
+For these two only, the query was moved into a Stored Procedure under an `ETL` schema
+(`ETL.usp_GetDimCustomerIncremental`, `ETL.usp_GetDimResellerIncremental`), called from the OLE DB
+Source as `EXEC ETL.usp_GetDim<Name>Incremental @LastWatermark = ?` — see
+[`docs/ETL_STORED_PROCEDURES.md`](ETL_STORED_PROCEDURES.md) for the full procedure definitions.
+
+**Reasoning:**
+- This directly satisfies the Phase 0 business scenario requirement ("update incrementally, not via
+  full reload") that Decision #5's interim truncate-and-reload approach didn't meet.
+- The watermark condition only checks `ModifiedDate` on tables that actually supply an output column
+  (a key, attribute, or measure) — join-only/filter-only tables (e.g. `Customer` in the fact queries,
+  used solely to route rows between Internet and Reseller sales) are excluded, since their
+  `ModifiedDate` has no bearing on whether the output row's content changed.
+- The Stored Procedure pattern is applied **reactively, not by default** — only for the two queries
+  that actually hit the OLE DB parameter-parsing error. Every other package keeps the simpler
+  parameterized `SQL Command` approach, since that's easier to read and modify directly from the SSIS
+  Source Editor without opening SSMS.
+
+---
+
+## 8. A single, unified Data Warehouse instead of separate Data Marts
+
+**Phase:** 3–4 (made explicit while designing the SSAS Tabular model, but reflects the DW's structure
+since Phase 1)
+**Decision:** all dimensions and both fact tables live in one Data Warehouse
+(`AdventureWorksDW_Custom`), rather than being split into separate, physically distinct Data Marts
+(e.g. an "Internet Sales Data Mart" and a "Reseller Sales Data Mart").
+
+**Reasoning:**
+The Phase 0 business scenario explicitly requires comparing Internet Sales and Reseller Sales side by
+side — that requirement is much harder to satisfy with separate Data Marts, which tend to drift into
+incompatible dimension definitions over time (a classic problem with the "independent Data Mart"
+approach). Instead, this project follows Kimball's **Bus Architecture**: a single warehouse where
+`DimDate`, `DimProduct`, `DimSalesTerritory`, `DimCurrency`, and `DimPromotion` are **conformed
+dimensions** — the exact same table, with the exact same keys, referenced by both fact tables. This
+gives the benefit normally associated with Data Marts (a focused, subject-specific view for each sales
+channel) without the physical duplication or the risk of the two "views" drifting apart, since there's
+only one copy of each shared dimension to maintain.
+
+---
+
+## 9. A single, unified SSAS Tabular model instead of separate models per channel
+
+**Phase:** 4 — SSAS Tabular
+**Decision:** one Tabular model (Compatibility Level 1700) contains both `FactInternetSales` and
+`FactResellerSales`, sharing the conformed dimensions from Decision #8 — rather than building two
+separate Tabular models, one per sales channel.
+
+**Reasoning:** a direct consequence of Decision #8 and the same business requirement (comparing both
+channels together). A single model lets one Power BI report query both fact tables through the shared
+dimensions in the same visual (e.g. the Executive Overview page's combined revenue trend and channel
+split), which two separate models — even if their dimensions were kept in sync — couldn't do without
+composite models or duplicated data. **Perspectives** (`Internet Sales`, `Reseller Sales`, `Executive
+Overview`) were added on top of the single model to give each audience a focused subset of
+tables/measures to browse, without needing separate physical models.
+
+---
+
+## 10. `DimGeography` excluded from the Tabular model
+
+**Phase:** 4 — SSAS Tabular
+**Decision:** `DimGeography` (a table in the DW schema from Phase 1) is not imported into the Tabular
+model.
+
+**Reasoning:** during Phase 4 model review, `DimGeography` was found to have no relationship to any
+other table — an orphaned table. Its intended role (Type 2 geography attributes) had, in practice, been
+built as **denormalized columns directly inside `DimCustomer` and `DimReseller`** (`City`,
+`StateProvinceName`, `CountryRegionName`) rather than resolved through a `GeographyKey` foreign key —
+this was how Decision #2's Type 2 geography columns were actually implemented. Since a flat,
+denormalized star schema (not a snowflake) is the preferred shape for a Tabular model, keeping
+`DimGeography` unused in the model would only add clutter without a working relationship to justify it.
+It was removed from the Tabular model (`Delete from Model`) but left untouched in the underlying DW, in
+case a future redesign wants to properly normalize geography behind a `GeographyKey`.
+
+---
+
+## 11. Base/building-block measures instead of duplicated DAX logic
+
+**Phase:** 4–5 — SSAS Tabular / Power BI DAX
+**Decision:** every DAX measure is layered: simple **base measures** on raw columns (e.g.
+`Internet Net Revenue = SUM(FactInternetSales[LineTotal])`), then **combined measures** built by
+referencing those base measures rather than re-deriving the same expression (e.g.
+`Total Sales (All Channels) = [Internet Net Revenue] + [Reseller Net Revenue]`), then **analytical
+measures** built on top of the combined ones (e.g. `Total Sales PY (All Channels)`,
+`Total Sales YoY % (All Channels)`, `Internet Sales Share %`).
+
+**Reasoning:** this follows the DRY (Don't Repeat Yourself) principle applied to DAX. Writing out
+`[Internet Net Revenue] + [Reseller Net Revenue]` inline inside every measure that needs "total sales"
+means that adding a third sales channel later would require finding and editing every measure that
+duplicated that expression — an easy way to introduce a silent, inconsistent bug if one occurrence is
+missed. With base/building-block measures, the underlying expression exists in exactly one place;
+every dependent measure updates automatically. This also made a real bug fix (see
+`TROUBLESHOOTING.md`, entry 9 — the `ALL(DimDate)` fix for `*_Sales_PY`) propagate correctly to every
+dependent measure (`*_YoY_%`, `Total Sales YoY % (All Channels)`) without needing to touch them
+individually.
+
+---
+
 <!-- Add new entries below this line as new architecture decisions are made. -->
 
 ---
@@ -171,15 +279,14 @@ Ideas captured during design discussions that belong to a specific upcoming phas
 a numbered decision above once it's actually implemented, with the real reasoning and any trade-offs
 discovered during the build.
 
-- **Phase 3 — Incremental extraction using `ModifiedDate` as a watermark.**
-  Current dimension packages do a full read of the source table on every run and detect changes via
-  column-by-column comparison in a Conditional Split (see decision #2). Most AdventureWorks OLTP
-  tables (`Production.Product`, `Sales.Customer`, `Sales.SalesOrderHeader`, etc.) already have a
-  `ModifiedDate DATETIME` column. A future incremental-extraction pass can filter the OLE DB Source
-  query to `WHERE ModifiedDate > @LastETLRunDate`, so only rows actually changed since the last run
-  are read and compared — instead of reading the full source table every time. This satisfies the
-  Phase 0 business scenario requirement ("update incrementally, not via full reload") more literally
-  than the current change-detection-only approach.
-  (Note: SQL Server's `timestamp`/`rowversion` type is a separate, unrelated mechanism — an
-  auto-incrementing per-row version number, not an actual date/time — that could serve the same
-  watermark purpose if a table lacked a `ModifiedDate` column.)
+- **Phase 7 — `FullReloadMode` parameter in `Package_Master`.**
+  A Boolean package parameter that, when true, truncates every dimension and fact table (except the
+  static `DimDate`) and resets every row in `ETL_Watermark` to `1900-01-01` before running the normal
+  load sequence — giving the project a documented, repeatable way to rebuild the warehouse from scratch
+  (e.g. after a schema change or a bug like the `DimDate` range issue in `TROUBLESHOOTING.md` entry 8),
+  instead of the ad-hoc manual `TRUNCATE` + watermark reset used to fix that bug.
+
+- **Phase 9 — SSRS paginated report.**
+  A print-ready, paginated report (as opposed to the interactive Power BI dashboard), connecting either
+  directly to the DW or to the deployed Tabular model via a DAX/MDX query, reusing the same measures
+  already defined in the semantic model rather than re-deriving report logic in SSRS.
