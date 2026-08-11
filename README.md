@@ -62,7 +62,9 @@ the full reasoning behind this and other key design decisions.
 
 ## Dashboard Preview
 
-See [`docs/screenshots/`](docs/screenshots/) for full-size images of all four report pages.
+![Executive Overview Dashboard](docs/screenshots/page1.JPG)
+
+See [`docs/screenshots/`](docs/screenshots/) for all four report pages.
 
 ## Repository Structure
 
