@@ -269,6 +269,46 @@ individually.
 
 ---
 
+## 12. `FullReloadMode` parameter with an explicit Unknown Member row per dimension
+
+**Phase:** 7 — SSIS, `Package_Master`
+**Decision:** a Boolean package parameter, `FullReloadMode` (default `False`), controls a new
+`SQL_FullReload_Reset` Execute SQL Task that always runs at the start of `Package_Master`, but only
+takes action when `FullReloadMode = 1` — the conditional logic lives inside the SQL itself
+(`IF @FullReloadMode = 1 BEGIN ... END`), not on the Precedence Constraint. When triggered, it:
+
+1. `TRUNCATE`s both fact tables first (`FactInternetSales`, `FactResellerSales`).
+2. `DELETE`s every incrementally-loaded dimension (not `DimDate`, which is static).
+3. Re-seeds each dimension's identity column to `0` (`DBCC CHECKIDENT ... RESEED, 0`) and inserts an
+   explicit **Unknown Member** row at key `0` (e.g. `DimCustomer` key `0` = "Unknown Customer",
+   `DimProduct` key `0` = "Unknown Product", etc.).
+4. Resets every row in `ETL_Watermark` to `1900-01-01`, so the next run re-extracts everything from
+   scratch as if it were the very first load.
+
+**Reasoning:**
+- **Conditional logic inside the SQL, not on the Precedence Constraint:** an earlier version put the
+  `FullReloadMode` check directly on the constraint between `SQL_FullReload_Reset` and
+  `SEQ_LoadDimensions`, which meant dimensions only loaded when `FullReloadMode = True` — breaking
+  ordinary incremental runs entirely. Moving the check inside the SQL script means
+  `SQL_FullReload_Reset` and `SEQ_LoadDimensions` always both run unconditionally in sequence; the
+  `IF` block simply does nothing when `FullReloadMode = False`. This keeps the control-flow graph of
+  the package simple regardless of the flag's value.
+- **`DELETE` instead of `TRUNCATE` for dimensions:** truncating a dimension that's still referenced by
+  an un-truncated fact table fails with a `FOREIGN KEY` violation (the same class of issue as
+  `TROUBLESHOOTING.md` entry 1, for `DimDate`). Since the fact tables are truncated first in the same
+  batch, a `DELETE` on each dimension succeeds — `DELETE` is evaluated per-row against current
+  constraints rather than requiring the referencing table's row count to be zero at parse time in the
+  same way `TRUNCATE` does.
+- **Unknown Member pattern:** re-seeding identities to `0` and inserting an explicit "Unknown X" row
+  at key `0` for every dimension is a standard Kimball dimensional-modeling practice. It gives the ETL
+  a safe fallback: if a future Lookup Transformation ever fails to resolve a business key to a
+  dimension row (a bad/missing key in the source, a late-arriving dimension row, etc.), the fact row
+  can be mapped to the Unknown Member instead of failing the whole load or being silently dropped.
+  `DimGeography` was deliberately left without this treatment, since it isn't part of the active
+  Tabular model (Decision #10) and isn't populated by any current ETL package.
+
+---
+
 <!-- Add new entries below this line as new architecture decisions are made. -->
 
 ---
@@ -278,13 +318,6 @@ individually.
 Ideas captured during design discussions that belong to a specific upcoming phase. Move each one into
 a numbered decision above once it's actually implemented, with the real reasoning and any trade-offs
 discovered during the build.
-
-- **Phase 7 — `FullReloadMode` parameter in `Package_Master`.**
-  A Boolean package parameter that, when true, truncates every dimension and fact table (except the
-  static `DimDate`) and resets every row in `ETL_Watermark` to `1900-01-01` before running the normal
-  load sequence — giving the project a documented, repeatable way to rebuild the warehouse from scratch
-  (e.g. after a schema change or a bug like the `DimDate` range issue in `TROUBLESHOOTING.md` entry 8),
-  instead of the ad-hoc manual `TRUNCATE` + watermark reset used to fix that bug.
 
 - **Phase 9 — SSRS paginated report.**
   A print-ready, paginated report (as opposed to the interactive Power BI dashboard), connecting either
