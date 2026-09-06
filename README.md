@@ -30,8 +30,8 @@ AdventureWorks sales management wants a Data Warehouse that can:
 | 4 | SSAS Tabular model | ✅ Done — [`ssas/`](ssas/), [`docs/PHASE4_SSAS_TABULAR_SUMMARY.md`](docs/PHASE4_SSAS_TABULAR_SUMMARY.md) |
 | 5 | Power BI dashboard | ✅ Done — [`powerbi/`](powerbi/) |
 | 6 | Final documentation | 🔄 In progress — this README, [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
-| 7 | Automation / deployment (optional) | ⬜ Not started |
-| 8 | Performance review — execution plans & indexing on DW tables (with a PDF report, like Phase 0) | ⬜ Not started |
+| 7 | Automation / deployment (optional) | ⬜ Not started |پ
+| 8 | Performance review — execution plans & indexing on DW tables (with a PDF report, like Phase 0) | ✅ Done — [`docs/Phase8_Performance_Review.pdf`](docs/Phase8_Performance_Review.pdf) |
 | 9 | SSRS paginated report (optional) | ⬜ Not started |
 
 ## Architecture
