@@ -330,4 +330,59 @@ an error, making the bug easy to miss without deliberately testing multiple peri
 
 ---
 
+## 10. SQL Server Agent job failures while automating SSIS + SSAS processing
+
+**Phase:** 7 — Automation, `Job_AdventureWorks_DailyLoad` (SQL Server Agent)
+**Context:** after deploying the SSIS project to the `SSISDB` catalog, a two-step SQL Server Agent job
+was built to run nightly: Step 1 executes `Package_Master` (from the SSIS Catalog), Step 2 processes
+the SSAS Tabular model via a `SQL Server Analysis Services Command` step. Two separate failures were
+hit and fixed, in sequence, while getting Step 2 working.
+
+**Failure 1 — a copy-pasted `DatabaseID` silently included a trailing newline**
+```
+Description="Either the database with the ID of 'AdventureWorksDW_Tabular&#xA;' does not exist in
+the server with the ID of 'DESKTOP-JU6PMUD\TABULAR', or the user does not have permissions to access
+the object."
+```
+`&#xA;` is the XML entity for a newline character. Copying the database name from SSMS's Properties
+dialog into the `<DatabaseID>` tag brought an invisible trailing newline along with it, so the engine
+searched for a database literally named `"AdventureWorksDW_Tabular\n"`, which doesn't exist — the real
+database name has no such character. **Fix:** retyped the database name directly into the XML instead
+of copy-pasting it, keeping `<DatabaseID>AdventureWorksDW_Tabular</DatabaseID>` on one line with no
+stray whitespace.
+
+**Failure 2 — classic XMLA `<Process>` command incompatible with this model's storage engine**
+```
+Description="This command cannot be executed on database 'AdventureWorksDW_Tabular' because it has
+been defined with StorageEngineUsed set to TabularMetadata. For databases in this mode, you must use
+Tabular APIs to administer the database."
+```
+The classic XMLA `<Batch><Process>...</Process></Batch>` command (used for Multidimensional models
+and older Tabular compatibility levels) is not supported against a model using the
+`TabularMetadata` storage engine — the mode this project's model uses at Compatibility Level 1700.
+**Fix:** replaced the XMLA command with **TMSL** (Tabular Model Scripting Language, JSON-based), which
+is the currently-supported way to script operations against modern Tabular models:
+```json
+{
+  "refresh": {
+    "type": "full",
+    "objects": [
+      { "database": "AdventureWorksDW_Tabular" }
+    ]
+  }
+}
+```
+The same `SQL Server Analysis Services Command` job step type accepts TMSL exactly as it accepted
+XMLA — no change to the job step type itself was needed, only the command text.
+
+**Lesson:** for any Tabular model at a modern compatibility level, prefer TMSL over classic XMLA for
+scripted administration (Agent jobs, PowerShell, CI/CD) — XMLA's `<Process>` command is a
+Multidimensional/legacy-Tabular concept that silently fails with an explicit (if easy to miss on first
+read) error rather than being auto-translated. Separately, any XML/JSON command text built by copying
+values out of a GUI (like a database name from Properties) should be re-typed or trimmed rather than
+pasted verbatim, since invisible whitespace/newline characters are a very easy, very silent way to
+break an otherwise-correct command.
+
+---
+
 <!-- Add new entries below this line as the project progresses. -->
